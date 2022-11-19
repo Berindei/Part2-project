@@ -33,9 +33,8 @@ let rec printtype t =
     | Arrow (t1, t2)  -> fstring "(%s→%s)" (printtype t1) (printtype t2)
     | Prod (t1, t2)   -> fstring "(%s*%s)" (printtype t1) (printtype t2)
     | ISum (t1, t2)   -> fstring "(%s+%s)" (printtype t1) (printtype t2)
-    | G t'            -> fstring "G(%s)" (printtype t');;
+    | G t'            -> fstring "G(%s)" (printtype t')
     
-printtype (G(Loli(Tensor(LUnit, LUnit), LUnit)))
 
 type expr = 
     | EUnit
@@ -83,19 +82,31 @@ let rec printexpr e =
     | Select (x1, x2, e1, e2, e3, e4) -> fstring "(from {%s←%s; %s←%s} select %s→%s | %s→%s)" x1 (printexpr e1) x2 (printexpr e2) x1 (printexpr e3) x2 (printexpr e4)
 
 type usage = Used | Fresh | Inf
-type state = {var: var; used: usage; typ: typ}
+type incl(*ude*) = Use | Ignore
 
-let mkstate v u t = {var=v; used=u; typ=t}
+type state = {var: var; used: usage; typ: typ; incl: incl; delay: int}
 
-let used v t = mkstate v Used t
-let fresh v t = mkstate v Fresh t
-let int v t = mkstate v Inf t
+let mkstate v u t i d = {var=v; used=u; typ=t; incl=i; delay=d}
+
+let used v t :state= mkstate v Used t Use 0
+let fresh v t = mkstate v Fresh t Use 0
+let int v t = mkstate v Inf t Use 0
+
+let delayed v t d = {(fresh v t) with delay = d}
 
 type ctx = state list
 
 let printusage u = match u with Fresh->"1"| Used->"0" | Inf->"∞"
 
-let printstate s = fstring "%s^%s: %s" s.var (printusage s.used) (printtype s.typ) 
+let printstate s =
+    let printinner =
+        match s.used with
+        | Inf | _ when s.delay=0 -> fstring "%s^%s: %s" s.var (printusage s.used) (printtype s.typ)
+        | Used | Fresh -> fstring "%s^%s: %s[%d]" s.var (printusage s.used) (printtype s.typ) s.delay
+    in let i = printinner in
+    match s.incl with
+    | Use -> i
+    | Ignore -> fstring "#%s#" i 
 
 let printctx c =
     let rec loop c = 
@@ -135,12 +146,14 @@ let set: ctx -> unit t = fun (nctx: ctx) -> fun (ctx: ctx) -> Value ((), nctx)
 let rec lookup: var -> state t = fun (x: var) -> fun (ctx: ctx) ->
     match ctx with
     | []                     -> Error (fstring "Variable %s not in context" x)
+    | y :: ys when x = y.var && y.incl = Ignore -> Error (fstring "Variable %s not available in this context" x)
     | y :: ys when x = y.var -> Value (y, y :: ys)
     | y :: ys                -> (lookup x >>= (fun s -> fun ctx' -> Value(s, y :: ctx'))) ys
 
 let rec lookup_update: var -> state t = fun (x: var) -> fun (ctx: ctx) ->
     match ctx with
     | []                     -> Error (fstring "Variable %s not in context" x)
+    | y :: ys when x = y.var && y.incl = Ignore -> Error (fstring "Variable %s not available in this context" x)
     | y :: ys when x = y.var && y.used = Inf -> Value (y, ctx)
     | y :: ys when x = y.var -> Value (y, {y with used=Used} :: ys)
     | y :: ys                -> (lookup_update x >>= (fun s -> fun ctx' -> Value(s, y :: ctx'))) ys
@@ -160,7 +173,7 @@ let rec find l v =
 let rec same (ctx1: ctx) (ctx2: ctx) : bool = 
     match ctx1, ctx2 with
     | s :: ss, _ -> if find ctx2 s then same ss (rm ctx2 s)
-                                    else false
+                                   else false
     | [], []     -> true
     | [], _      -> false
 
@@ -192,7 +205,7 @@ let withvars: state list -> 'a t -> 'a t = fun xs -> fun m ->
                                            in checker xs ctx'
 
 let empty: ctx -> unit t = fun ctx ->
-    match List.find_opt (fun s -> if s.used=Fresh then true else false) ctx with
+    match List.find_opt (fun s -> if s.used=Fresh && s.incl=Use then true else false) ctx with
     | Some s -> error (fstring "Unused variable %s in linear context" s.var)
     | None -> return ()
 
@@ -244,7 +257,7 @@ let plsEvt t =
     | _ -> error (unexpectedform "♢(α)" t)
 
 let lim: ctx -> ctx t = fun ctx ->
-    return (List.filter (fun s -> s.used=Inf) ctx)
+    return (List.map (fun s -> if s.used!=Inf then {s with incl=Ignore} else s) ctx)
 
 type ent = Lin | Int
 
