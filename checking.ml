@@ -3,8 +3,11 @@ exception Unimplemented
 exception UnexpectedError
 
 type var = string
+type time = int
 
 let fstring = Printf.sprintf
+
+let filtermap l f p = List.map (fun x -> if p x then f x else x) l
 
 type typ = 
     | TVar   of var
@@ -19,6 +22,10 @@ type typ =
     | Prod   of typ * typ
     | ISum   of typ * typ
     | G      of typ
+    | Time   of time
+    | At     of typ * time
+    | UnivT  of var * typ
+    | ExistT of var * typ
 
 let rec printtype t = 
     match t with
@@ -34,29 +41,39 @@ let rec printtype t =
     | Prod (t1, t2)   -> fstring "(%s*%s)" (printtype t1) (printtype t2)
     | ISum (t1, t2)   -> fstring "(%s+%s)" (printtype t1) (printtype t2)
     | G t'            -> fstring "G(%s)" (printtype t')
+    | Time t'         -> string_of_int t'
+    | At (t1, t')     -> fstring "%s@%s" (printtype t1) (string_of_int t')
+    | UnivT (x, t')   -> fstring "∀%s:Time. %s" x (printtype t')
+    | ExistT (x, t')  -> fstring "∃%s:Time. %s" x (printtype t')
     
 
 type expr = 
     | EUnit
-    | Var     of var
-    | Lambda  of var * expr
-    | App     of expr * expr
-    | Pair    of expr * expr
-    | Unpair  of var * var * expr * expr
-    | Annot   of expr * typ
-    | L       of expr
-    | R       of expr
-    | Case    of expr * var * expr * var * expr
-    | Proj1   of expr
-    | Proj2   of expr
-    | EF      of expr
-    | EG      of expr
-    | Run     of expr
-    | LetF    of var * expr * expr
-    | EEvt    of expr
-    | LetEvt  of var * expr * expr
-    | Let     of var * expr * expr
-    | Select  of var * var * expr * expr * expr * expr
+    | Var        of var
+    | Lambda     of var * expr
+    | App        of expr * expr
+    | Pair       of expr * expr
+    | Unpair     of var * var * expr * expr
+    | Annot      of expr * typ
+    | L          of expr
+    | R          of expr
+    | Case       of expr * var * expr * var * expr
+    | Proj1      of expr
+    | Proj2      of expr
+    | EF         of expr
+    | EG         of expr
+    | Run        of expr
+    | LetF       of var * expr * expr
+    | EEvt       of expr
+    | LetEvt     of var * expr * expr
+    | Let        of var * expr * expr
+    | Select     of var * var * expr * expr * expr * expr
+    | EAt        of expr
+    | LetAt      of var * expr * expr
+    | LambdaTime of var * expr
+    | AppTime    of expr * expr
+    | Pack       of expr * expr
+    | LetPack    of var * var * expr * expr
 
 let rec printexpr e =
     match e with
@@ -80,19 +97,28 @@ let rec printexpr e =
     | LetEvt (x, e1, e2)              -> fstring "let evt(%s) = %s in %s" x (printexpr e1) (printexpr e2)
     | Let (x, e1, e2)                 -> fstring "let %s = %s in %s" x (printexpr e1) (printexpr e2)
     | Select (x1, x2, e1, e2, e3, e4) -> fstring "(from {%s←%s; %s←%s} select %s→%s | %s→%s)" x1 (printexpr e1) x2 (printexpr e2) x1 (printexpr e3) x2 (printexpr e4)
+    | EAt e'                          -> fstring "@(%s)" (printexpr e')
+    | LetAt (x, e1, e2)               -> fstring "let @%s = %s in %s" x (printexpr e1) (printexpr e2)
+    | LambdaTime (x, e')              -> fstring "Λ%s:Time. %S" x (printexpr e')
+    | AppTime (e1, e2)                -> fstring "(%s [%s])" (printexpr e1) (printexpr e2)
+    | Pack (e1, e2)                   -> fstring "pack(%s, %s)" (printexpr e1) (printexpr e2)
+    | LetPack (i, x, e1, e2)          -> fstring "let pack(%s, %s) = %s in %s" i x (printexpr e1) (printexpr e2)
 
 type usage = Used | Fresh | Inf
-type incl(*ude*) = Use | Ignore
+type flag = Use | Ignore
 
-type state = {var: var; used: usage; typ: typ; incl: incl; delay: int}
+type state = {var: var; used: usage; typ: typ; ignore: flag; delay: flag list; at: time}
 
-let mkstate v u t i d = {var=v; used=u; typ=t; incl=i; delay=d}
+let mkstate v u t i d a = {var=v; used=u; typ=t; ignore=i; delay=d; at=a}
 
-let used v t :state= mkstate v Used t Use 0
-let fresh v t = mkstate v Fresh t Use 0
-let int v t = mkstate v Inf t Use 0
+let used v t :state= mkstate v Used t Use [Use] 0 
+let fresh v t = mkstate v Fresh t Use [Use] 0
+let int v t = mkstate v Inf t Use [Use] 0
 
-let delayed v t d = {(fresh v t) with delay = d}
+let delayed v t d = {(fresh v t) with at = d}
+
+let ignore s = s.ignore = Ignore || List.exists (fun x -> x=Ignore) s.delay
+let use s = s.ignore = Use && List.for_all (fun x -> x=Use) s.delay
 
 type ctx = state list
 
@@ -101,12 +127,15 @@ let printusage u = match u with Fresh->"1"| Used->"0" | Inf->"∞"
 let printstate s =
     let printinner =
         match s.used with
-        | Inf | _ when s.delay=0 -> fstring "%s^%s: %s" s.var (printusage s.used) (printtype s.typ)
-        | Used | Fresh -> fstring "%s^%s: %s[%d]" s.var (printusage s.used) (printtype s.typ) s.delay
+        | _ when s.at=0 -> fstring "%s^%s: %s" s.var (printusage s.used) (printtype s.typ)
+        | Inf -> fstring "%s^%s: %s" s.var (printusage s.used) (printtype s.typ)
+        | Used | Fresh -> fstring "%s^%s: %s[%d]" s.var (printusage s.used) (printtype s.typ) s.at
     in let i = printinner in
-    match s.incl with
-    | Use -> i
-    | Ignore -> fstring "#%s#" i 
+    match s.ignore, List.exists (fun x -> x=Ignore) s.delay with
+    | Use, false -> i
+    | Ignore, false -> fstring "#%s#" i
+    | Use, true -> fstring "@%s@" i
+    | Ignore, true -> fstring "#@%s@#" i
 
 let printctx c =
     let rec loop c = 
@@ -146,14 +175,14 @@ let set: ctx -> unit t = fun (nctx: ctx) -> fun (ctx: ctx) -> Value ((), nctx)
 let rec lookup: var -> state t = fun (x: var) -> fun (ctx: ctx) ->
     match ctx with
     | []                     -> Error (fstring "Variable %s not in context" x)
-    | y :: ys when x = y.var && y.incl = Ignore -> Error (fstring "Variable %s not available in this context" x)
+    | y :: ys when x = y.var && ignore y -> Error (fstring "Variable %s not available in this context" x)
     | y :: ys when x = y.var -> Value (y, y :: ys)
     | y :: ys                -> (lookup x >>= (fun s -> fun ctx' -> Value(s, y :: ctx'))) ys
 
 let rec lookup_update: var -> state t = fun (x: var) -> fun (ctx: ctx) ->
     match ctx with
     | []                     -> Error (fstring "Variable %s not in context" x)
-    | y :: ys when x = y.var && y.incl = Ignore -> Error (fstring "Variable %s not available in this context" x)
+    | y :: ys when x = y.var && ignore y -> Error (fstring "Variable %s not available in this context" x)
     | y :: ys when x = y.var && y.used = Inf -> Value (y, ctx)
     | y :: ys when x = y.var -> Value (y, {y with used=Used} :: ys)
     | y :: ys                -> (lookup_update x >>= (fun s -> fun ctx' -> Value(s, y :: ctx'))) ys
@@ -205,7 +234,7 @@ let withvars: state list -> 'a t -> 'a t = fun xs -> fun m ->
                                            in checker xs ctx'
 
 let empty: ctx -> unit t = fun ctx ->
-    match List.find_opt (fun s -> if s.used=Fresh && s.incl=Use then true else false) ctx with
+    match List.find_opt (fun s -> s.used=Fresh && use s) ctx with
     | Some s -> error (fstring "Unused variable %s in linear context" s.var)
     | None -> return ()
 
@@ -257,7 +286,22 @@ let plsEvt t =
     | _ -> error (unexpectedform "♢(α)" t)
 
 let lim: ctx -> ctx t = fun ctx ->
-    return (List.map (fun s -> if s.used!=Inf then {s with incl=Ignore} else s) ctx)
+    return (filtermap ctx (fun s -> {s with ignore=Ignore}) (fun s -> s.used!=Inf)) (*(List.map (fun s -> if s.used!=Inf then {s with incl=Ignore} else s) ctx)*)
+
+let nolin: 'a t -> 'a t = fun m ->
+                          let* ctx = get in
+                          let* r = lim ctx >>> set >> m in
+                          get >>> empty >> set ctx >> return r
+
+let delay: time -> 'a t -> 'a t = fun t -> fun m ->
+                                  let* ctx = get in
+                                  let ctx' = List.map (fun s -> {s with delay = (if s.at=t then Use else Ignore)::s.delay}) ctx in
+                                  let* r = set ctx' >> m in
+                                  let* ctx'' = get in
+                                  set (List.map (fun s -> {s with delay = (List.tl s.delay)}) ctx'') >> return r
+
+(* let timed: ctx -> time -> ctx t = fun ctx -> fun t ->
+    return (filtermap ctx (fun s -> {s with incl=Ignore}) (fun s -> (s.used=Fresh || s.used=Used) && s.delay!=t)) *)
 
 type ent = Lin | Int
 
@@ -335,6 +379,7 @@ and infer ?attempt (e: expr) (ent: ent) : typ t = print_endline (fstring "Inferi
     | _ -> match attempt with
            | None   -> error (fstring "Can't infer type of %s" (printexpr e))
            | Some t -> error (fstring "Can't check %s against %s" (printexpr e) (printtype t))
+and delayed ?checking e = return ()
 
 
 let test1 = 
