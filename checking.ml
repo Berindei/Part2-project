@@ -22,7 +22,7 @@ type typ =
     | Prod   of typ * typ
     | ISum   of typ * typ
     | G      of typ
-    | Time   of time
+    | Time
     | At     of typ * time
     | UnivT  of var * typ
     | ExistT of var * typ
@@ -41,7 +41,7 @@ let rec printtype t =
     | Prod (t1, t2)   -> fstring "(%s*%s)" (printtype t1) (printtype t2)
     | ISum (t1, t2)   -> fstring "(%s+%s)" (printtype t1) (printtype t2)
     | G t'            -> fstring "G(%s)" (printtype t')
-    | Time t'         -> string_of_int t'
+    | Time            -> "Time"
     | At (t1, t')     -> fstring "%s@%s" (printtype t1) (string_of_int t')
     | UnivT (x, t')   -> fstring "∀%s:Time. %s" x (printtype t')
     | ExistT (x, t')  -> fstring "∃%s:Time. %s" x (printtype t')
@@ -333,12 +333,10 @@ let rec check (e: expr) (t: typ) (ent: ent) : unit t = print_endline (fstring "C
                                             withvar (int x2 t2) (check e2 t Int)
     | LetF (x, e1, e2), _, Lin -> let* t' = infer e1 Lin >>> plsF in
                                   withvar (int x t') (check e2 t Lin)
-    | EG(e'), G(t'), Int -> let* ctx = get in
-                            lim ctx >>> set >> check e' t' Lin >> get >>> empty >> set ctx
+    | EG(e'), G(t'), Int -> let* ctx = get in nolin (check e' t Lin)
     | EEvt(e'), Evt(t'), Lin -> check e' t' Lin
     | LetEvt(x, e1, e2), Evt(t'), Lin -> let* t1 = infer e1 Lin >>> plsEvt in
-                                         let* ctx = get in
-                                         lim ctx >>> set >> withvar (fresh x t1) (check e2 t Lin) >> set ctx
+                                         nolin (withvar (fresh x t1) (check e2 t Lin))
     | Let(x, e1, e2), _, ent -> let* t' = infer e1 ent in 
                                 let s = (match ent with
                                         | Lin -> fresh x t'
@@ -346,11 +344,11 @@ let rec check (e: expr) (t: typ) (ent: ent) : unit t = print_endline (fstring "C
                                 withvar s (check e2 t ent)
     | Select(x1, x2, e1, e2, e1', e2'), Evt(t'), Lin -> let* t1 = infer e1 Lin >>> plsEvt in
                                                         let* t2 = infer e2 Lin >>> plsEvt in
-                                                        let* ctx = get in
-                                                        let* ctx1 = withvars ([fresh x1 t1; fresh x2 (Evt(t2))]) (check e1' t Lin) >> get in
-                                                        let* ctx2 = set ctx >> withvars ([fresh x1 (Evt(t1)); fresh x2 t2]) (check e2' t Lin) >> get in
-                                                        if same ctx1 ctx2 then return ()
-                                                                          else error (fstring "Different resulting contexts in select statement %s" (printexpr e))
+                                                        nolin ( let* ctx = get in
+                                                                let* ctx1 = withvars ([fresh x1 t1; fresh x2 (Evt(t2))]) (check e1' t Lin) >> get in
+                                                                let* ctx2 = set ctx >> withvars ([fresh x1 (Evt(t1)); fresh x2 t2]) (check e2' t Lin) >> get in
+                                                                if same ctx1 ctx2 then return ()
+                                                                                else error (fstring "Different resulting contexts in select statement %s" (printexpr e)))
                                                         
     | _, _, _ -> let* t' = infer e ent ~attempt:t in
                  if t=t' then return ()
@@ -372,10 +370,8 @@ and infer ?attempt (e: expr) (ent: ent) : typ t = print_endline (fstring "Inferi
                            check e2 t1 ent >> return t2
     | App (e1, e2), Lin -> let* t1, t2 = infer e1 ent >>> plsLoli in
                            check e2 t1 ent >> return t2 
-    | Run(e'), Lin -> infer e' Int >>> plsG >>> return
-    | EF(e'), Lin -> let* ctx = get in
-                     let* t' = lim ctx >>> set >> infer e' Int in
-                     set ctx >> return (F t')
+    | Run(e'), Lin -> nolin (infer e' Int >>> plsG >>> return)
+    | EF(e'), Lin -> nolin ( let* t' = infer e' Int in return (F t'))
     | _ -> match attempt with
            | None   -> error (fstring "Can't infer type of %s" (printexpr e))
            | Some t -> error (fstring "Can't check %s against %s" (printexpr e) (printtype t))
